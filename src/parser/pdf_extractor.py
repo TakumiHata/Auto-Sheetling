@@ -71,7 +71,21 @@ def extract_pdf_data(pdf_path: str) -> Dict[str, Any]:
             )
 
             # 表データの抽出
-            tables = page.find_tables()
+            # snap_tolerance: 近接する平行エッジを同一線にまとめる距離(pt)。
+            #   デフォルト3pt だと隣接セルの左辺・右辺が2本として認識され列が倍増するため大きめに設定。
+            # edge_min_length: この長さ未満のエッジを無視する(pt)。
+            #   短い装飾的な線分がテーブル境界として誤検出されるのを抑制する。
+            _table_settings = {
+                "snap_tolerance": 5,
+                "snap_y_tolerance": 5,
+                "join_tolerance": 5,
+                "join_y_tolerance": 5,
+                "edge_min_length": 20,
+                "intersection_tolerance": 5,
+                "intersection_x_tolerance": 5,
+                "intersection_y_tolerance": 5,
+            }
+            tables = page.find_tables(table_settings=_table_settings)
             table_bboxes = [table.bbox for table in tables]
             # 各テーブルの列境界X座標リスト・行境界Y座標リスト（グリッド生成用）
             table_col_x_positions = []
@@ -156,8 +170,8 @@ def extract_pdf_data(pdf_path: str) -> Dict[str, Any]:
                         v_entry['font_size'] = round(float(raw_sz), 1)
                     words.append(v_entry)
 
-            # 表の内部構造（2次元配列）の取得
-            table_data = page.extract_tables()
+            # 表の内部構造（2次元配列）の取得（find_tables と同じ設定を使う）
+            table_data = page.extract_tables(table_settings=_table_settings)
             # 扱いやすくするため、改行文字等が含まれていたら除去
             cleaned_tables = []
             for table in table_data:
@@ -206,6 +220,14 @@ def extract_pdf_data(pdf_path: str) -> Dict[str, Any]:
                 rect_area = (r['x1'] - r['x0']) * (r['bottom'] - r['top'])
                 if rect_area >= 0.85 * page_area:
                     continue  # ページ全体を覆う矩形は除外
+                # ストロークなし（塗りつぶしのみ）の矩形はエッジ検出に使わない。
+                # ただし極細矩形（線として描かれた罫線）は stroking_color に依らず含める。
+                rw = float(r['x1']) - float(r['x0'])
+                rh = float(r['bottom']) - float(r['top'])
+                is_line_like = rh < 2.0 or rw < 2.0
+                has_stroke = r.get('stroking_color') is not None
+                if not has_stroke and not is_line_like:
+                    continue
                 rx0, rx1 = float(r['x0']), float(r['x1'])
                 rt,  rb  = float(r['top']), float(r['bottom'])
                 h_edges.append({'x0': rx0, 'x1': rx1, 'y': rt})  # 上辺
