@@ -1,5 +1,6 @@
 import argparse
 import os
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -45,8 +46,14 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        default="gemini-2.0-flash",
-        help="[auto mode only] Gemini model name (default: gemini-2.0-flash)"
+        default="gemini-3.1-flash-lite-preview",
+        help="[auto mode only] Gemini model name (default: gemini-3.1-flash-lite-preview)"
+    )
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=2.0,
+        help="[auto mode only] Delay in seconds between processing multiple PDF files (default: 2.0)"
     )
     args = parser.parse_args()
 
@@ -69,7 +76,11 @@ def main():
             logger.warning("No PDF files found in data/in. Please place PDF files to process.")
             return
 
-        for pdf_path in pdf_files:
+        for i, pdf_path in enumerate(pdf_files):
+            if i > 0 and args.delay > 0:
+                logger.info(f"次のファイルまで {args.delay} 秒待機中...")
+                time.sleep(args.delay)
+
             try:
                 output_path = pipeline.run(
                     str(pdf_path),

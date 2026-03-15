@@ -14,11 +14,13 @@ Gemini API を使って Phase 2（LLMとのやり取り）を自動化する。
 
 import json
 import re
+import time
+import random
 from pathlib import Path
 
 import google.generativeai as genai
 
-from src.core.pipeline import SheetlingPipeline, _compute_grid_coords, _sanitize_generated_code
+from src.core.pipeline import SheetlingPipeline, _compute_grid_coords, _sanitize_generated_code, _setup_grid_params, _fill_missing_text
 from src.parser.pdf_extractor import extract_pdf_data
 from src.templates.prompts import (
     TABLE_ANCHOR_PROMPT,
@@ -61,7 +63,7 @@ class AutoSheetlingPipeline(SheetlingPipeline):
     Phase 1 と Phase 3 は親クラス SheetlingPipeline をそのまま利用する。
     """
 
-    def __init__(self, output_base_dir: str, api_key: str, model_name: str = "gemini-2.0-flash"):
+    def __init__(self, output_base_dir: str, api_key: str, model_name: str = "gemini-3.1-flash-lite-preview"):
         super().__init__(output_base_dir)
         genai.configure(api_key=api_key)
         self.model_name = model_name
@@ -69,13 +71,29 @@ class AutoSheetlingPipeline(SheetlingPipeline):
         logger.info(f"Gemini モデル '{model_name}' を使用します。")
 
     def _call_gemini(self, prompt: str, images: list = None) -> str:
-        """Gemini API を呼び出してテキストを生成する。"""
+        """Gemini API を呼び出してテキストを生成する（クォータエラー時はリトライする）。"""
         if images:
             contents = [prompt] + images
         else:
             contents = prompt
-        response = self.model.generate_content(contents)
-        return response.text
+
+        max_retries = 5
+        base_delay = 5
+        for attempt in range(max_retries):
+            try:
+                response = self.model.generate_content(contents)
+                return response.text
+            except Exception as e:
+                # 429 Resource Exhausted をチェック
+                if "429" in str(e) or "ResourceExhausted" in type(e).__name__:
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                        logger.warning(f"クォータ制限に達しました。{delay:.2f}秒後にリトライします ({attempt + 1}/{max_retries})...")
+                        time.sleep(delay)
+                        continue
+                logger.error(f"Gemini API 呼び出し中にエラーが発生しました: {e}")
+                raise
+        raise RuntimeError("Gemini API のリトライ回数が上限に達しました。")
 
     def run(
         self,
@@ -132,25 +150,18 @@ class AutoSheetlingPipeline(SheetlingPipeline):
         except Exception as e:
             logger.warning(f"ページ画像の出力に失敗しました: {e}")
 
-        # 抽出データを保存
+        # グリッドパラメータ設定・座標付与（extracted.json 保存前に実施して _row/_col を含める）
+        first_page = extracted_data['pages'][0]
+        grid_params = _setup_grid_params(first_page, grid_size)
+
+        for page in extracted_data['pages']:
+            _compute_grid_coords(page, grid_params['max_rows'], grid_params['max_cols'])
+
+        # 抽出データを保存（グリッド座標付与済み）
         extracted_json_path = out_dir / f"{pdf_name}_extracted.json"
         with open(extracted_json_path, "w", encoding="utf-8") as f:
             json.dump(extracted_data, f, indent=2, ensure_ascii=False)
         logger.info(f"[Phase 1] 完了: {extracted_json_path}")
-
-        # グリッドパラメータ設定
-        grid_params = dict(GRID_SIZES.get(grid_size, GRID_SIZES["small"]))
-        first_page = extracted_data['pages'][0]
-        is_landscape = first_page['width'] > first_page['height']
-        if is_landscape:
-            grid_params['max_rows'], grid_params['max_cols'] = grid_params['max_cols'], grid_params['max_rows']
-            _row_padding = 2
-            grid_params['excel_row_height'] = round(595.0 / (grid_params['max_rows'] + _row_padding), 2)
-        grid_params['orientation'] = 'landscape' if is_landscape else 'portrait'
-
-        # グリッド座標付与
-        for page in extracted_data['pages']:
-            _compute_grid_coords(page, grid_params['max_rows'], grid_params['max_cols'])
 
         input_data_str = json.dumps(extracted_data, indent=2, ensure_ascii=False)
 
@@ -195,6 +206,8 @@ class AutoSheetlingPipeline(SheetlingPipeline):
 
         step1_5_raw = self._call_gemini(prompt_1_5)
         step1_5_output = _extract_json(step1_5_raw)
+        # LLM の見落とし補完: extracted_data の全 words と照合して欠落テキストを補充
+        step1_5_output = _fill_missing_text(step1_5_output, extracted_data)
         with open(prompts_dir / f"{pdf_name}_step1_5_output.json", "w", encoding="utf-8") as f:
             f.write(step1_5_output)
         logger.info("[Phase 2 / Step 1.5] 完了")

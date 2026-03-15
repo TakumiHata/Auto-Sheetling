@@ -55,7 +55,7 @@ def _compute_grid_coords(page: dict, max_rows: int, max_cols: int) -> None:
         sorted_vals = sorted(raw_vals)
         clusters: list = []
         for v in sorted_vals:
-            if not clusters or v - clusters[-1][-1] > grid_size * 0.6 or v in anchor_vals:
+            if not clusters or v - clusters[-1][0] > grid_size * 0.5 or v in anchor_vals:
                 clusters.append([v])
             else:
                 clusters[-1].append(v)
@@ -72,6 +72,8 @@ def _compute_grid_coords(page: dict, max_rows: int, max_cols: int) -> None:
     x_vals: set = set()
     # テーブル列境界X座標（クラスタリング時に独立扱いにするため別途保持）
     table_col_x_anchors: set = set()
+    # テーブル行境界Y座標（クラスタリング時に独立扱いにするため別途保持）
+    table_row_y_anchors: set = set()
 
     for w in page['words']:
         y_vals.add(snap(w['top']))
@@ -94,7 +96,9 @@ def _compute_grid_coords(page: dict, max_rows: int, max_cols: int) -> None:
             table_col_x_anchors.add(sx)
     for row_ys in page.get('table_row_y_positions', []):
         for y in row_ys:
-            y_vals.add(snap(y))
+            sy = snap(y)
+            y_vals.add(sy)
+            table_row_y_anchors.add(sy)
     for cells in page.get('table_cells', []):
         for c in cells:
             y_vals.add(snap(c['top']))
@@ -111,7 +115,7 @@ def _compute_grid_coords(page: dict, max_rows: int, max_cols: int) -> None:
         y_vals.add(snap(edge['y0']))
         y_vals.add(snap(edge['y1']))
 
-    y_map = build_cluster_map(y_vals, grid_h, max_rows)
+    y_map = build_cluster_map(y_vals, grid_h, max_rows, anchor_vals=table_row_y_anchors)
     x_map = build_cluster_map(x_vals, grid_w, max_cols, anchor_vals=table_col_x_anchors)
 
     # テーブル列境界が同一グリッド列に潰れた場合の後処理:
@@ -125,6 +129,19 @@ def _compute_grid_coords(page: dict, max_rows: int, max_cols: int) -> None:
                 idx = prev_idx + 1
             idx = min(idx, max_cols)
             x_map[x] = idx
+            prev_idx = idx
+
+    # テーブル行境界が同一グリッド行に潰れた場合の後処理:
+    # 各テーブルの行Y座標を上から順に走査し、前の行と同じグリッド行になっていたら +1 する。
+    for row_ys in page.get('table_row_y_positions', []):
+        snapped_ys = sorted(set(snap(y) for y in row_ys))
+        prev_idx = 0
+        for y in snapped_ys:
+            idx = y_map[y]
+            if idx <= prev_idx:
+                idx = prev_idx + 1
+            idx = min(idx, max_rows)
+            y_map[y] = idx
             prev_idx = idx
 
     # words に付与
@@ -242,6 +259,133 @@ def _compute_grid_coords(page: dict, max_rows: int, max_cols: int) -> None:
 logger = get_logger(__name__)
 
 
+def _has_japanese(text: str) -> bool:
+    """文字列に日本語文字（漢字・ひらがな・カタカナ・全角記号）が含まれるか判定する。"""
+    return any(
+        '\u3040' <= c <= '\u30ff'  # ひらがな・カタカナ
+        or '\u4e00' <= c <= '\u9fff'  # CJK 統合漢字
+        or '\uff00' <= c <= '\uffef'  # 全角英数・記号
+        for c in text
+    )
+
+
+def _join_word_texts(texts: list) -> str:
+    """
+    word テキストのリストを結合する。
+    TABLE_ANCHOR_PROMPT と同じルール:
+      - 日本語文字を含む場合はスペースなし
+      - 英数字のみの場合は半角スペースで結合
+    """
+    combined = ''.join(texts)
+    if _has_japanese(combined):
+        return combined
+    return ' '.join(t for t in texts if t.strip())
+
+
+def _fill_missing_text(layout_json_str: str, extracted_data: dict) -> str:
+    """
+    LLMが生成したレイアウトJSONに対し、extracted_dataのwordsと照合して
+    欠落しているテキスト要素をプログラム的に補完する。
+
+    Step 1 / Step 1.5 の LLM が見落とした word を確実に補う。
+    既に text 要素が存在する (row, col) には追加しない（上書き禁止）。
+    """
+    try:
+        layout = json.loads(layout_json_str)
+    except (json.JSONDecodeError, ValueError):
+        return layout_json_str  # パース失敗時はそのまま返す
+
+    total_added = 0
+    for page_layout in layout:
+        page_num = page_layout.get('page_number', 1)
+        page_data = next(
+            (p for p in extracted_data['pages'] if p['page_number'] == page_num),
+            None,
+        )
+        if not page_data:
+            continue
+
+        # 既存 text 要素の (row, col) を収集
+        existing: set = set()
+        for elem in page_layout.get('elements', []):
+            if elem.get('type') == 'text':
+                existing.add((elem['row'], elem['col']))
+
+        # words を (_row, _col) でグループ化
+        groups: dict = {}
+        for w in page_data.get('words', []):
+            if '_row' not in w or '_col' not in w:
+                continue
+            key = (w['_row'], w['_col'])
+            groups.setdefault(key, []).append(w)
+
+        added = []
+        for (row, col), words in sorted(groups.items()):
+            if (row, col) in existing:
+                continue
+            content = _join_word_texts([w.get('text', '') for w in words])
+            stripped = content.strip()
+            # 空白・純粋な区切り記号（ASCII句読点の1文字）はスキップ
+            # ただし △▼○● 等の図形記号・日本語1文字は意味があるため残す
+            if not stripped or (len(stripped) == 1 and stripped in '!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~'):
+                continue
+            elem: dict = {
+                'type': 'text',
+                'content': content,
+                'row': row,
+                'col': col,
+                'end_col': col + len(content),
+            }
+            first = words[0]
+            if first.get('font_color') and first['font_color'] != '000000':
+                elem['font_color'] = first['font_color']
+            if first.get('font_size'):
+                elem['font_size'] = first['font_size']
+            added.append(elem)
+
+        if added:
+            page_layout['elements'].extend(added)
+            total_added += len(added)
+
+    if total_added:
+        logger.info(f"[fill_missing_text] {total_added} 個の欠落テキスト要素を補完しました")
+
+    return json.dumps(layout, ensure_ascii=False)
+
+
+# A4 縦の基準サイズ (pt) — GRID_SIZES のセル密度はこのサイズを基準に調整されている
+_A4_W_PT: float = 595.28
+_A4_H_PT: float = 841.89
+
+
+def _setup_grid_params(first_page: dict, grid_size: str) -> dict:
+    """
+    ページ寸法に基づいてグリッドパラメータを設定する。
+
+    GRID_SIZES の A4 基準値から 1グリッドセルあたりのポイント数を算出し、
+    実際のページ寸法に比例して max_cols / max_rows を動的計算する。
+    これにより A4 以外の用紙サイズ（A3 など）にも正しく対応できる。
+    """
+    ref = GRID_SIZES.get(grid_size, GRID_SIZES["small"])
+    grid_params = dict(ref)
+
+    # 実ページ寸法から max_cols / max_rows を動的計算
+    pt_per_col = _A4_W_PT / ref['max_cols']
+    pt_per_row = _A4_H_PT / ref['max_rows']
+    grid_params['max_cols'] = max(1, round(first_page['width'] / pt_per_col))
+    grid_params['max_rows'] = max(1, round(first_page['height'] / pt_per_row))
+
+    # 用紙サイズ検出（long side > 1000pt → A3）
+    max_dim_pt = max(first_page['width'], first_page['height'])
+    grid_params['paper_size'] = 8 if max_dim_pt > 1000 else 9  # 8=A3, 9=A4
+
+    # 向き
+    is_landscape = first_page['width'] > first_page['height']
+    grid_params['orientation'] = 'landscape' if is_landscape else 'portrait'
+
+    return grid_params
+
+
 class SheetlingPipeline:
     """
     1. PDF を解析してプロンプトを出力する (Phase 1)。
@@ -285,26 +429,17 @@ class SheetlingPipeline:
         except Exception as e:
             logger.warning(f"ページ画像の出力に失敗しました（Step 1.6 はスキップ可能）: {e}")
 
-        extracted_json_path = out_dir / f"{pdf_name}_extracted.json"
-        with open(extracted_json_path, "w", encoding="utf-8") as f:
-            json.dump(extracted_data, f, indent=2, ensure_ascii=False)
-
-        grid_params = dict(GRID_SIZES.get(grid_size, GRID_SIZES["small"]))
-
-        # ページの向きを検出（最初のページの width > height なら横向き）
         first_page = extracted_data['pages'][0]
-        is_landscape = first_page['width'] > first_page['height']
-        if is_landscape:
-            grid_params['max_rows'], grid_params['max_cols'] = grid_params['max_cols'], grid_params['max_rows']
-            # A4 landscape 高さ = 595pt。(max_rows + row_padding) 行がちょうど収まるよう行高をスケール
-            # row_padding=2 は CODE_GEN_PROMPT と合わせた定数
-            _row_padding = 2
-            grid_params['excel_row_height'] = round(595.0 / (grid_params['max_rows'] + _row_padding), 2)
-        grid_params['orientation'] = 'landscape' if is_landscape else 'portrait'
+        grid_params = _setup_grid_params(first_page, grid_size)
 
         # Y・X座標のクラスタリングを行い、各要素に事前計算済みExcel座標を付与
         for page in extracted_data['pages']:
             _compute_grid_coords(page, grid_params['max_rows'], grid_params['max_cols'])
+
+        # グリッド座標付与済みの状態で保存（_row/_col をデバッグ用ファイルに含める）
+        extracted_json_path = out_dir / f"{pdf_name}_extracted.json"
+        with open(extracted_json_path, "w", encoding="utf-8") as f:
+            json.dump(extracted_data, f, indent=2, ensure_ascii=False)
 
         input_data_str = json.dumps(extracted_data, indent=2, ensure_ascii=False)
 
@@ -392,6 +527,62 @@ class SheetlingPipeline:
             "generated_code_base_path": str(generated_code_path),
             "page_image_paths": [str(p) for p in page_image_paths],
         }
+
+    def fill_layout(self, pdf_name: str, step1_5_json: str, specific_out_dir: str = None) -> str:
+        """
+        手動パイプライン用: STEP 1.5 の LLM 出力に対してプログラム的テキスト補完を適用する。
+
+        STEP 1.5 の LLM が見落とした word を extracted_data と照合して補完し、
+        補完済み JSON を prompts/{pdf_name}_step1_5_output.json として保存する。
+        また、STEP 2 プロンプトを補完済み JSON で更新して保存する。
+
+        Args:
+            pdf_name:        PDF ファイル名（拡張子なし）
+            step1_5_json:    STEP 1.5 の LLM 出力 JSON 文字列
+            specific_out_dir: 出力ディレクトリ（省略時は data/out/{pdf_name}）
+
+        Returns:
+            補完済みレイアウト JSON 文字列
+        """
+        if specific_out_dir:
+            out_dir = Path(specific_out_dir)
+        else:
+            out_dir = self.output_base_dir / pdf_name
+
+        # extracted.json を読み込む（グリッド座標付与済み）
+        extracted_json_path = out_dir / f"{pdf_name}_extracted.json"
+        if not extracted_json_path.exists():
+            raise FileNotFoundError(
+                f"extracted.json が見つかりません: {extracted_json_path}. "
+                "generate_prompts() を先に実行してください。"
+            )
+
+        with open(extracted_json_path, "r", encoding="utf-8") as f:
+            extracted_data = json.load(f)
+
+        # テキスト補完を適用
+        filled_json = _fill_missing_text(step1_5_json, extracted_data)
+
+        # 補完済み JSON を保存
+        prompts_dir = out_dir / "prompts"
+        prompts_dir.mkdir(parents=True, exist_ok=True)
+        filled_json_path = prompts_dir / f"{pdf_name}_step1_5_output.json"
+        with open(filled_json_path, "w", encoding="utf-8") as f:
+            f.write(filled_json)
+        logger.info(f"[fill_layout] 補完済みレイアウト JSON を保存しました: {filled_json_path}")
+
+        # STEP 2 プロンプトのプレースホルダーを補完済み JSON で置換して保存
+        prompt_2_path = prompts_dir / f"{pdf_name}_prompt_step2.txt"
+        if prompt_2_path.exists():
+            with open(prompt_2_path, "r", encoding="utf-8") as f:
+                prompt_2 = f.read()
+            placeholder = "[ここにSTEP 1.5（または1.6）の出力（JSON部分のみ）を貼り付けてください]"
+            if placeholder in prompt_2:
+                with open(prompt_2_path, "w", encoding="utf-8") as f:
+                    f.write(prompt_2.replace(placeholder, filled_json))
+                logger.info(f"[fill_layout] STEP 2 プロンプトを補完済み JSON で更新しました: {prompt_2_path}")
+
+        return filled_json
 
     def render_excel(self, pdf_name: str, specific_out_dir: str = None) -> str:
         """

@@ -178,16 +178,12 @@ def extract_pdf_data(pdf_path: str) -> Dict[str, Any]:
             for r in page.rects:
                 rect_area = (r['x1'] - r['x0']) * (r['bottom'] - r['top'])
                 if rect_area < 0.85 * page_area:
-                    rect_entry = {
+                    rects.append({
                         'x0': float(r['x0']),
                         'top': float(r['top']),
                         'x1': float(r['x1']),
                         'bottom': float(r['bottom'])
-                    }
-                    fill_hex = _to_hex_color(r.get('non_stroking_color'))
-                    if fill_hex is not None:
-                        rect_entry['fill_color'] = fill_hex
-                    rects.append(rect_entry)
+                    })
 
             rects = _remove_containing_rects(rects)
 
