@@ -243,11 +243,15 @@ def _compute_grid_coords(page: dict, max_rows: int, max_cols: int) -> None:
         h_edge_map.setdefault(ri, []).append((min(cs, ce), max(cs, ce)))
 
     v_edge_map: dict = {}
+    v_edge_max_span: dict = {}  # col_idx -> その列で検出された垂直エッジの最大スパン(pt)
     for edge in page.get('v_edges', []):
         ci = _nearest_idx(edge['x'], x_map)
         rs = _nearest_idx(edge['y0'], y_map)
         re = _nearest_idx(edge['y1'], y_map)
         v_edge_map.setdefault(ci, []).append((min(rs, re), max(rs, re)))
+        span = edge.get('span', abs(edge['y1'] - edge['y0']))
+        if span > v_edge_max_span.get(ci, 0):
+            v_edge_max_span[ci] = span
 
     def _overlaps_h(edges: list, col_s: int, col_e: int) -> bool:
         """エッジリストの中に col_s〜col_e スパンと 50% 以上重複するものがあるか。"""
@@ -279,6 +283,10 @@ def _compute_grid_coords(page: dict, max_rows: int, max_cols: int) -> None:
         """指定列に row_s〜row_e をカバーする垂直エッジがあるか。"""
         return _overlaps_v(v_edge_map.get(col, []), row_s, row_e)
 
+    # 主要垂直境界の閾値(pt): この高さ以上のエッジがある列は月区切り等の主要線とみなす。
+    # 短いセル側辺（≈1行高≈20pt）は除外し、表高の30%超を占める線だけを採用する。
+    _MAJOR_V_SPAN_THRESHOLD = page['height'] * 0.30
+
     # table_border_rects に _borders を付与
     for tbr in page['table_border_rects']:
         r, er, c, ec = tbr['_row'], tbr['_end_row'], tbr['_col'], tbr['_end_col']
@@ -288,6 +296,9 @@ def _compute_grid_coords(page: dict, max_rows: int, max_cols: int) -> None:
             'left':   _has_v(c,  r, er),
             'right':  _has_v(ec, r, er),
         }
+        # 主要垂直境界フラグ: 長い縦線（月区切り等）が検出された列か
+        tbr['_major_left']  = v_edge_max_span.get(c,  0) >= _MAJOR_V_SPAN_THRESHOLD
+        tbr['_major_right'] = v_edge_max_span.get(ec, 0) >= _MAJOR_V_SPAN_THRESHOLD
 
     # rects にも _borders を付与（矩形枠の各辺）
     for rect in page['rects']:
@@ -410,13 +421,15 @@ def _apply_borders_to_xlsx(xlsx_path: str, extracted_data: dict, max_rows: int) 
         for tbr in page.get('table_border_rects', []):
             borders = tbr.get('_borders', {'top': True, 'bottom': True, 'left': True, 'right': True})
             # ガントチャート等の細幅セル（Excel 2列以下）は内側の垂直罫線を抑制する。
-            # テーブル外周（_outer_left/_outer_right）はそのまま描画して外枠を維持する。
+            # ただし以下は例外として縦線を保持する:
+            #   - テーブル外周（_outer_left/_outer_right）
+            #   - 主要境界（_major_left/_major_right）: 月区切り等の長いエッジが検出された列
             col_span = tbr['_end_col'] - tbr['_col']
             if col_span <= 2:
                 borders = dict(borders)
-                if not tbr.get('_outer_left', False):
+                if not tbr.get('_outer_left', False) and not tbr.get('_major_left', False):
                     borders['left'] = False
-                if not tbr.get('_outer_right', False):
+                if not tbr.get('_outer_right', False) and not tbr.get('_major_right', False):
                     borders['right'] = False
             _draw(
                 tbr['_row'] + row_offset, tbr['_end_row'] + row_offset,

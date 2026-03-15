@@ -214,7 +214,8 @@ def extract_pdf_data(pdf_path: str) -> Dict[str, Any]:
                 if abs(lb - lt) < 2.0 and abs(lx1 - lx0) > 2.0:   # 水平線
                     h_edges.append({'x0': min(lx0, lx1), 'x1': max(lx0, lx1), 'y': (lt + lb) / 2})
                 elif abs(lx1 - lx0) < 2.0 and abs(lb - lt) > 2.0:  # 垂直線
-                    v_edges.append({'x': (lx0 + lx1) / 2, 'y0': min(lt, lb), 'y1': max(lt, lb)})
+                    v_edges.append({'x': (lx0 + lx1) / 2, 'y0': min(lt, lb), 'y1': max(lt, lb),
+                                    'span': abs(lb - lt)})
 
             for r in page.rects:
                 rect_area = (r['x1'] - r['x0']) * (r['bottom'] - r['top'])
@@ -232,8 +233,8 @@ def extract_pdf_data(pdf_path: str) -> Dict[str, Any]:
                 rt,  rb  = float(r['top']), float(r['bottom'])
                 h_edges.append({'x0': rx0, 'x1': rx1, 'y': rt})  # 上辺
                 h_edges.append({'x0': rx0, 'x1': rx1, 'y': rb})  # 下辺
-                v_edges.append({'x': rx0, 'y0': rt, 'y1': rb})   # 左辺
-                v_edges.append({'x': rx1, 'y0': rt, 'y1': rb})   # 右辺
+                v_edges.append({'x': rx0, 'y0': rt, 'y1': rb, 'span': rb - rt})  # 左辺
+                v_edges.append({'x': rx1, 'y0': rt, 'y1': rb, 'span': rb - rt})  # 右辺
 
             page_data = {
                 "page_number": page_number,
