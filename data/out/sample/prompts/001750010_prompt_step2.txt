@@ -1,0 +1,127 @@
+あなたはPythonプログラミングのエキスパートです。
+以下のExcelレイアウト仕様（JSON）を元に、openpyxlを使ったExcel生成スクリプトを作成してください。
+
+## グリッド設定（必須）
+全列・全行に以下の値を**ハードコード**で適用してください（mmからの再計算・変数化は禁止）：
+- 列幅: `ws.column_dimensions[get_column_letter(c)].width = 2.53` （これはExcel固有の単位値。6.0mmに相当。変換禁止）
+- 行高: `ws.row_dimensions[r].height = 17.01` （これはExcel固有の単位値。6.0mmに相当。変換禁止）
+- 適用範囲: 列1〜36、行1〜(総ページ数 × 50)
+- デフォルトフォントサイズ: 9pt（`font_size` 未指定の text 要素はこのサイズを使用）
+
+## 必須インポート
+
+スクリプト冒頭に以下を含めること：
+```python
+from openpyxl.styles import Border, Side, Alignment, Font
+```
+
+## 要素の種類
+
+入力JSONに含まれる要素は `text` と `border_rect` の2種類のみです。
+
+## text 処理パターン（厳守・改変禁止）
+
+以下のコードを**一字一句そのまま**使用してください。`ws.max_row` / `ws.max_column` による境界チェック、セルの存在確認、独自のガード処理は**絶対に追加しないこと**。
+
+```python
+if item["type"] == "text":
+    r = item["row"] + row_offset
+    try:
+        cell = ws.cell(row=r, column=item["col"] + col_offset)
+        cell.value = item["content"]
+        if item.get("is_vertical"):
+            cell.alignment = Alignment(text_rotation=255, vertical='top', wrap_text=False)
+        else:
+            cell.alignment = Alignment(horizontal='left', vertical='center', wrap_text=False)
+        font_kwargs = {"size": item.get("font_size") or 9}
+        if item.get("font_color"):
+            font_kwargs["color"] = item["font_color"]
+        cell.font = Font(**font_kwargs)
+    except AttributeError:
+        pass
+```
+
+## border_rect 処理パターン（必須）
+
+`borders` フィールドの各辺（top/bottom/left/right）が `true` の辺のみ罫線を描画します。
+隣接する `border_rect` の外枠が接することで内部の区切り線が自然に形成されます。
+
+```python
+from openpyxl.styles import Border, Side, Alignment, Font
+thin = Side(style='thin')
+
+def apply_border(ws, s_row, e_row, s_col, e_col, borders):
+    has_top    = borders.get("top",    True)
+    has_bottom = borders.get("bottom", True)
+    has_left   = borders.get("left",   True)
+    has_right  = borders.get("right",  True)
+    for r in range(s_row, e_row + 1):
+        for c in range(s_col, e_col + 1):
+            target = ws.cell(row=r, column=c)
+            try:
+                target.alignment = Alignment(horizontal='left', vertical='center', wrap_text=False)
+            except AttributeError:
+                pass
+            top    = thin if (r == s_row and has_top)    else None
+            bottom = thin if (r == e_row and has_bottom) else None
+            left   = thin if (c == s_col and has_left)   else None
+            right  = thin if (c == e_col and has_right)  else None
+            try:
+                target.border = Border(top=top, bottom=bottom, left=left, right=right)
+            except AttributeError:
+                pass
+
+elif item["type"] == "border_rect":
+    apply_border(
+        ws,
+        item["row"] + row_offset, item["end_row"] + row_offset,
+        item["col"] + col_offset, item["end_col"] + col_offset,
+        item.get("borders", {"top": True, "bottom": True, "left": True, "right": True})
+    )
+```
+
+## セルスタイル（必須）
+- すべてのセル: `Alignment(horizontal='left', vertical='center', wrap_text=False)`
+- セル結合（ws.merge_cells）は使用禁止
+
+## 印刷設定（必須）
+- 用紙サイズ: `ws.page_setup.paperSize = 9`（定数は使わず直接代入）
+- 向き: `ws.page_setup.orientation = 'portrait'`（定数は使わず直接代入）
+- スケーリング: fitToWidth / fitToPage は設定しない（等倍100%が大前提）
+- 余白（数値は変更禁止）:
+  ```python
+  ws.page_margins.left = 0.47
+  ws.page_margins.right = 0.47
+  ws.page_margins.top = 0.41
+  ws.page_margins.bottom = 0.41
+  ```
+- 印刷範囲: 入力JSONに `print_range` があればそれを使用。なければ、入力データの各要素から実際に使用されている最大行・最大列を求め、`A1:{最大列文字}{最大行番号}` を設定すること。`max_rows` や `total_pages × max_rows` を印刷範囲の計算に**使用しないこと**（コンテンツが収まらず2ページ目に溢れる原因になる）。
+
+## 複数ページ対応
+- 全ページを1シート（`wb.active`）に縦に並べる
+- オフセット定数（コード先頭で定義）: `col_offset = 1`（左右1マス余白）、`row_padding = 2`（上下2マス余白）
+- 2ページ目以降のrow_offset = `(page_number - 1) * 50 + row_padding`
+- ページ境界に改ページ設定:
+  ```python
+  from openpyxl.worksheet.pagebreak import Break
+  ws.row_breaks.append(Break(id=page_number * (50 + row_padding)))
+  ```
+- 行の高さ設定範囲（`row_dimensions`）は `総ページ数 × 50` まで適用すること。ただし**印刷範囲はこの値を使わず**、上記の「実際に使用されている最大行」に基づくこと。データの最終使用行に定数を加算するバッファ処理は**禁止**。
+
+## 技術的制約
+- `True`/`False`（Python形式）を使用。JSONの`true`/`false`は禁止
+- `[cite: ...]` のようなアノテーションタグは絶対に含めない（SyntaxErrorの原因）
+- 出力ファイル名: `output.xlsx`
+- `ws.page_margins` への dict 代入は**絶対に禁止**（`AttributeError: 'dict' object has no attribute 'to_tree'` の原因）。必ず属性代入形式を使用すること:
+  ```python
+  # ✗ 禁止
+  ws.page_margins = {'left': 0.47, ...}
+  # ✓ 正しい形式（上記「印刷設定」の通り）
+  ws.page_margins.left = 0.47
+  ```
+
+入力データ（Step 1のレイアウト仕様）:
+【重要】以下の入力データに `[` で始まる JSON 配列が含まれています。JSON配列の前後に説明文や検証コメントが含まれている場合は完全に無視し、`[` から `]` までのJSON部分のみを使用してください。
+[{"page_number": 1, "elements": [{"type": "text", "content": "（参考資料１）", "row": 1, "col": 5, "end_col": 12}, {"type": "text", "content": "管理委託契約締結前の現況確認方法の例", "row": 1, "col": 10, "end_col": 30}, {"type": "text", "content": "空き家管理作業", "row": 2, "col": 11, "end_col": 18}, {"type": "text", "content": "受託前現況確認表", "row": 2, "col": 18, "end_col": 27}, {"type": "text", "content": "依頼主名", "row": 4, "col": 5, "end_col": 9}, {"type": "text", "content": "：", "row": 4, "col": 9, "end_col": 10}, {"type": "text", "content": "物件所在地：", "row": 7, "col": 5, "end_col": 11}, {"type": "text", "content": "訪問日時", "row": 8, "col": 6, "end_col": 10}, {"type": "text", "content": "年", "row": 8, "col": 12, "end_col": 13}, {"type": "text", "content": "月", "row": 8, "col": 15, "end_col": 16}, {"type": "text", "content": "日", "row": 8, "col": 18, "end_col": 19}, {"type": "text", "content": "（", "row": 8, "col": 21, "end_col": 22}, {"type": "text", "content": "：", "row": 8, "col": 23, "end_col": 24}, {"type": "text", "content": "）～（", "row": 8, "col": 24, "end_col": 27}, {"type": "text", "content": "：", "row": 8, "col": 27, "end_col": 28}, {"type": "text", "content": "）", "row": 8, "col": 28, "end_col": 29}, {"type": "text", "content": "社名・所属", "row": 9, "col": 6, "end_col": 11}, {"type": "text", "content": "担当者", "row": 10, "col": 7, "end_col": 10}, {"type": "text", "content": "（氏名）", "row": 10, "col": 10, "end_col": 14}, {"type": "text", "content": "（連絡先）", "row": 10, "col": 19, "end_col": 24}, {"type": "text", "content": "確認箇所", "row": 13, "col": 5, "end_col": 9}, {"type": "text", "content": "項目有無", "row": 13, "col": 15, "end_col": 19}, {"type": "text", "content": "異常有無", "row": 13, "col": 17, "end_col": 21}, {"type": "text", "content": "備考（腐朽・破損・雨漏り箇所や残置物等）", "row": 13, "col": 21, "end_col": 36}, {"type": "text", "content": "門扉等", "row": 14, "col": 5, "end_col": 8}, {"type": "text", "content": "門扉", "row": 14, "col": 8, "end_col": 10}, {"type": "text", "content": "有・無", "row": 14, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 14, "col": 17, "end_col": 20}, {"type": "text", "content": "不法侵入の形跡（有・無）", "row": 14, "col": 22, "end_col": 34}, {"type": "text", "content": "駐車場出入口", "row": 15, "col": 8, "end_col": 14}, {"type": "text", "content": "有・無", "row": 15, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 15, "col": 17, "end_col": 20}, {"type": "text", "content": "不法侵入の形跡（有・無）", "row": 15, "col": 22, "end_col": 34}, {"type": "text", "content": "玄関ドア", "row": 16, "col": 8, "end_col": 12}, {"type": "text", "content": "有・無", "row": 16, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 16, "col": 17, "end_col": 20}, {"type": "text", "content": "不法侵入の形跡（有・無）", "row": 16, "col": 22, "end_col": 34}, {"type": "text", "content": "勝手口", "row": 17, "col": 8, "end_col": 11}, {"type": "text", "content": "有・無", "row": 17, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 17, "col": 17, "end_col": 20}, {"type": "text", "content": "不法侵入の形跡（有・無）", "row": 17, "col": 22, "end_col": 34}, {"type": "text", "content": "その他（）", "row": 17, "col": 8, "end_col": 12}, {"type": "text", "content": "有・無", "row": 17, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 17, "col": 17, "end_col": 20}, {"type": "text", "content": "建物外観", "row": 19, "col": 5, "end_col": 9}, {"type": "text", "content": "建物全体", "row": 19, "col": 8, "end_col": 12}, {"type": "text", "content": "有・無", "row": 19, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 19, "col": 17, "end_col": 20}, {"type": "text", "content": "建物の傾斜（有・無）", "row": 19, "col": 23, "end_col": 32}, {"type": "text", "content": "１階窓ガラス", "row": 20, "col": 8, "end_col": 14}, {"type": "text", "content": "有・無", "row": 20, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 20, "col": 17, "end_col": 20}, {"type": "text", "content": "１階雨戸", "row": 21, "col": 8, "end_col": 12}, {"type": "text", "content": "有・無", "row": 21, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 21, "col": 17, "end_col": 20}, {"type": "text", "content": "２階窓ガラス", "row": 22, "col": 8, "end_col": 14}, {"type": "text", "content": "有・無", "row": 22, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 22, "col": 17, "end_col": 20}, {"type": "text", "content": "２階雨戸", "row": 22, "col": 8, "end_col": 12}, {"type": "text", "content": "有・無", "row": 22, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 22, "col": 17, "end_col": 20}, {"type": "text", "content": "外壁", "row": 23, "col": 8, "end_col": 10}, {"type": "text", "content": "有・無", "row": 23, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 23, "col": 17, "end_col": 20}, {"type": "text", "content": "外装材剥落・脱落（有・無）", "row": 23, "col": 21, "end_col": 34}, {"type": "text", "content": "屋根", "row": 24, "col": 8, "end_col": 10}, {"type": "text", "content": "有・無", "row": 24, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 24, "col": 17, "end_col": 20}, {"type": "text", "content": "変形（有・無）", "row": 24, "col": 24, "end_col": 31}, {"type": "text", "content": "雨樋", "row": 25, "col": 8, "end_col": 10}, {"type": "text", "content": "有・無", "row": 25, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 25, "col": 17, "end_col": 20}, {"type": "text", "content": "テレビアンテナ", "row": 26, "col": 8, "end_col": 15}, {"type": "text", "content": "有・無", "row": 26, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 26, "col": 17, "end_col": 20}, {"type": "text", "content": "その他（）", "row": 27, "col": 8, "end_col": 12}, {"type": "text", "content": "有・無", "row": 27, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 27, "col": 17, "end_col": 20}, {"type": "text", "content": "敷地・外構", "row": 28, "col": 5, "end_col": 10}, {"type": "text", "content": "フェンス・ブロック塀", "row": 28, "col": 8, "end_col": 18}, {"type": "text", "content": "有・無", "row": 28, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 28, "col": 17, "end_col": 20}, {"type": "text", "content": "擁壁", "row": 29, "col": 8, "end_col": 10}, {"type": "text", "content": "有・無", "row": 29, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 29, "col": 17, "end_col": 20}, {"type": "text", "content": "庭・樹木等", "row": 30, "col": 8, "end_col": 13}, {"type": "text", "content": "有・無", "row": 30, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 30, "col": 17, "end_col": 20}, {"type": "text", "content": "雑草等繁茂（有・無）", "row": 30, "col": 20, "end_col": 30}, {"type": "text", "content": "樹木等はみ出し（有・無）", "row": 30, "col": 26, "end_col": 38}, {"type": "text", "content": "敷地周り・外構", "row": 31, "col": 8, "end_col": 15}, {"type": "text", "content": "有・無", "row": 31, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 31, "col": 17, "end_col": 20}, {"type": "text", "content": "不法投棄等（有・無）", "row": 31, "col": 23, "end_col": 32}, {"type": "text", "content": "屋外水栓", "row": 32, "col": 8, "end_col": 12}, {"type": "text", "content": "有・無", "row": 32, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 32, "col": 17, "end_col": 20}, {"type": "text", "content": "駐車場・駐輪場", "row": 33, "col": 8, "end_col": 15}, {"type": "text", "content": "有・無", "row": 33, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 33, "col": 17, "end_col": 20}, {"type": "text", "content": "その他（）", "row": 33, "col": 8, "end_col": 12}, {"type": "text", "content": "有・無", "row": 33, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 33, "col": 17, "end_col": 20}, {"type": "text", "content": "郵便・ライフライン", "row": 35, "col": 5, "end_col": 10}, {"type": "text", "content": "郵便受け", "row": 35, "col": 8, "end_col": 12}, {"type": "text", "content": "有・無", "row": 35, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 35, "col": 17, "end_col": 20}, {"type": "text", "content": "転送サービス（有・無）", "row": 35, "col": 23, "end_col": 33}, {"type": "text", "content": "電気", "row": 36, "col": 8, "end_col": 10}, {"type": "text", "content": "通電中・停止中", "row": 36, "col": 15, "end_col": 22}, {"type": "text", "content": "有・無", "row": 36, "col": 17, "end_col": 20}, {"type": "text", "content": "メーター異常（有・無）", "row": 36, "col": 23, "end_col": 33}, {"type": "text", "content": "ガス", "row": 37, "col": 8, "end_col": 10}, {"type": "text", "content": "開栓中・停止中", "row": 37, "col": 15, "end_col": 22}, {"type": "text", "content": "有・無", "row": 37, "col": 17, "end_col": 20}, {"type": "text", "content": "メーター異常（有・無）", "row": 37, "col": 23, "end_col": 33}, {"type": "text", "content": "水道", "row": 38, "col": 8, "end_col": 10}, {"type": "text", "content": "通水中・停止中", "row": 38, "col": 15, "end_col": 22}, {"type": "text", "content": "有・無", "row": 38, "col": 17, "end_col": 20}, {"type": "text", "content": "メーター異常（有・無）", "row": 38, "col": 23, "end_col": 33}, {"type": "text", "content": "建物内部", "row": 41, "col": 5, "end_col": 9}, {"type": "text", "content": "玄関", "row": 39, "col": 8, "end_col": 10}, {"type": "text", "content": "有・無", "row": 39, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 39, "col": 17, "end_col": 20}, {"type": "text", "content": "廊下", "row": 39, "col": 8, "end_col": 10}, {"type": "text", "content": "有・無", "row": 39, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 39, "col": 17, "end_col": 20}, {"type": "text", "content": "台所", "row": 40, "col": 8, "end_col": 10}, {"type": "text", "content": "有・無", "row": 40, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 40, "col": 17, "end_col": 20}, {"type": "text", "content": "洗面所・脱衣所", "row": 41, "col": 8, "end_col": 15}, {"type": "text", "content": "有・無", "row": 41, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 41, "col": 17, "end_col": 20}, {"type": "text", "content": "風呂場", "row": 42, "col": 8, "end_col": 11}, {"type": "text", "content": "有・無", "row": 42, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 42, "col": 17, "end_col": 20}, {"type": "text", "content": "便所", "row": 43, "col": 8, "end_col": 10}, {"type": "text", "content": "有・無", "row": 43, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 43, "col": 17, "end_col": 20}, {"type": "text", "content": "排水設備", "row": 44, "col": 8, "end_col": 12}, {"type": "text", "content": "有・無", "row": 44, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 44, "col": 17, "end_col": 20}, {"type": "text", "content": "浄化槽（有・使用休止届出済・無）", "row": 44, "col": 21, "end_col": 37}, {"type": "text", "content": "腐朽・破損・雨漏り箇所や残置物等", "row": 13, "col": 22, "end_col": 38, "font_size": 8.0}, {"type": "text", "content": "）", "row": 13, "col": 30, "end_col": 31, "font_size": 10.0}, {"type": "text", "content": "）", "row": 17, "col": 11, "end_col": 12, "font_size": 10.0}, {"type": "text", "content": "）", "row": 27, "col": 11, "end_col": 12, "font_size": 10.0}, {"type": "text", "content": "・", "row": 29, "col": 5, "end_col": 6, "font_size": 10.0}, {"type": "text", "content": "外構", "row": 30, "col": 5, "end_col": 7, "font_size": 10.0}, {"type": "text", "content": "）", "row": 33, "col": 11, "end_col": 12, "font_size": 10.0}, {"type": "text", "content": "・", "row": 36, "col": 5, "end_col": 6, "font_size": 10.0}, {"type": "text", "content": "ライフ", "row": 37, "col": 5, "end_col": 8, "font_size": 10.0}, {"type": "text", "content": "ライン", "row": 38, "col": 5, "end_col": 8, "font_size": 10.0}]}, {"page_number": 2, "elements": [{"type": "text", "content": "部屋①（階・東・西・南・北）", "row": 1, "col": 8, "end_col": 15}, {"type": "text", "content": "有・無", "row": 1, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 1, "col": 17, "end_col": 20}, {"type": "text", "content": "部屋②（階・東・西・南・北）", "row": 2, "col": 8, "end_col": 15}, {"type": "text", "content": "有・無", "row": 2, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 2, "col": 17, "end_col": 20}, {"type": "text", "content": "部屋③（階・東・西・南・北）", "row": 3, "col": 8, "end_col": 15}, {"type": "text", "content": "有・無", "row": 3, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 3, "col": 17, "end_col": 20}, {"type": "text", "content": "部屋④（階・東・西・南・北）", "row": 4, "col": 8, "end_col": 15}, {"type": "text", "content": "有・無", "row": 4, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 4, "col": 17, "end_col": 20}, {"type": "text", "content": "部屋⑤（階・東・西・南・北）", "row": 5, "col": 8, "end_col": 15}, {"type": "text", "content": "有・無", "row": 5, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 5, "col": 17, "end_col": 20}, {"type": "text", "content": "部屋⑥（階・東・西・南・北）", "row": 6, "col": 8, "end_col": 15}, {"type": "text", "content": "有・無", "row": 6, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 6, "col": 17, "end_col": 20}, {"type": "text", "content": "その他（）", "row": 6, "col": 8, "end_col": 13}, {"type": "text", "content": "有・無", "row": 6, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 6, "col": 17, "end_col": 20}, {"type": "text", "content": "その他", "row": 9, "col": 5, "end_col": 8}, {"type": "text", "content": "ベランダ・バルコニー", "row": 8, "col": 8, "end_col": 20}, {"type": "text", "content": "有・無", "row": 8, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 8, "col": 17, "end_col": 20}, {"type": "text", "content": "傾き・破損・腐食等（有・無）", "row": 8, "col": 21, "end_col": 35}, {"type": "text", "content": "その他（）", "row": 9, "col": 8, "end_col": 12}, {"type": "text", "content": "有・無", "row": 9, "col": 15, "end_col": 18}, {"type": "text", "content": "有・無", "row": 9, "col": 17, "end_col": 20}, {"type": "text", "content": "全体", "row": 12, "col": 5, "end_col": 7}, {"type": "text", "content": "詳細", "row": 12, "col": 11, "end_col": 13}, {"type": "text", "content": "近隣への影響", "row": 14, "col": 5, "end_col": 11}, {"type": "text", "content": "・汚水等の流出（有・無）", "row": 13, "col": 11, "end_col": 23}, {"type": "text", "content": "・害虫等の発生（有・無）", "row": 14, "col": 11, "end_col": 23}, {"type": "text", "content": "・動物の糞尿や棲みつき（有・無）", "row": 15, "col": 11, "end_col": 27}, {"type": "text", "content": "・悪臭の発生（有・無）", "row": 15, "col": 11, "end_col": 22}, {"type": "text", "content": "その他", "row": 16, "col": 5, "end_col": 8}, {"type": "text", "content": "備考・提案等", "row": 19, "col": 5, "end_col": 11}, {"type": "text", "content": "写真貼付欄", "row": 31, "col": 5, "end_col": 10}, {"type": "text", "content": "階・東・西・南・北", "row": 1, "col": 11, "end_col": 20, "font_size": 6.0}, {"type": "text", "content": "）", "row": 1, "col": 14, "end_col": 15, "font_size": 10.0}, {"type": "text", "content": "階・東・西・南・北", "row": 2, "col": 11, "end_col": 20, "font_size": 6.0}, {"type": "text", "content": "）", "row": 2, "col": 14, "end_col": 15, "font_size": 10.0}, {"type": "text", "content": "階・東・西・南・北", "row": 3, "col": 11, "end_col": 20, "font_size": 6.0}, {"type": "text", "content": "）", "row": 3, "col": 14, "end_col": 15, "font_size": 10.0}, {"type": "text", "content": "階・東・西・南・北", "row": 4, "col": 11, "end_col": 20, "font_size": 6.0}, {"type": "text", "content": "）", "row": 4, "col": 14, "end_col": 15, "font_size": 10.0}, {"type": "text", "content": "階・東・西・南・北", "row": 5, "col": 11, "end_col": 20, "font_size": 6.0}, {"type": "text", "content": "）", "row": 5, "col": 14, "end_col": 15, "font_size": 10.0}, {"type": "text", "content": "階・東・西・南・北", "row": 6, "col": 11, "end_col": 20, "font_size": 6.0}, {"type": "text", "content": "）", "row": 6, "col": 12, "end_col": 13, "font_size": 10.0}, {"type": "text", "content": "）", "row": 6, "col": 14, "end_col": 15, "font_size": 10.0}, {"type": "text", "content": "）", "row": 9, "col": 11, "end_col": 12, "font_size": 10.0}]}]
+
+出力はPythonコードのみをマークダウンのコードブロック（```python ... ```）で出力してください。前後の挨拶・説明文・思考プロセスは一切不要です。

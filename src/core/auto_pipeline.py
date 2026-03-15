@@ -69,7 +69,12 @@ class AutoSheetlingPipeline(SheetlingPipeline):
         super().__init__(output_base_dir)
         genai.configure(api_key=api_key)
         self.model_name = model_name
-        self.model = genai.GenerativeModel(model_name)
+        # max_output_tokens を明示設定: デフォルト(8192)だと大規模PDFの
+        # コード生成レスポンスが切れて 500 Internal Error になることがある
+        self.model = genai.GenerativeModel(
+            model_name,
+            generation_config={"max_output_tokens": 65536},
+        )
         logger.info(f"Gemini モデル '{model_name}' を使用します。")
 
     # API 呼び出しタイムアウト（秒）
@@ -108,10 +113,13 @@ class AutoSheetlingPipeline(SheetlingPipeline):
                 return response.text
             except Exception as e:
                 err_str = str(e)
-                # 429 Resource Exhausted / タイムアウトはリトライ対象
+                # 429 Resource Exhausted / タイムアウト / 500 Internal Error はリトライ対象
+                # 500 は一時的なサーバー側エラーで再試行により回復することが多い
                 is_retryable = (
                     "429" in err_str
+                    or "500" in err_str
                     or "ResourceExhausted" in type(e).__name__
+                    or "InternalServerError" in type(e).__name__
                     or "DeadlineExceeded" in type(e).__name__
                     or "TimeoutError" in type(e).__name__
                     or "timeout" in err_str.lower()
