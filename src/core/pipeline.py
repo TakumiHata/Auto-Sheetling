@@ -202,8 +202,10 @@ def _compute_grid_coords(page: dict, max_rows: int, max_cols: int) -> None:
                                page.get('table_row_y_positions', [])):
         col_xs_s = sorted(set(snap(x) for x in col_xs))
         row_ys_s = sorted(set(snap(y) for y in row_ys))
-        for ri in range(len(row_ys_s) - 1):
-            for ci in range(len(col_xs_s) - 1):
+        n_cols = len(col_xs_s) - 1
+        n_rows = len(row_ys_s) - 1
+        for ri in range(n_rows):
+            for ci in range(n_cols):
                 table_border_rects.append({
                     '_row':        y_map.get(row_ys_s[ri], 1),
                     '_end_row':    y_map.get(row_ys_s[ri + 1], 1),
@@ -213,6 +215,9 @@ def _compute_grid_coords(page: dict, max_rows: int, max_cols: int) -> None:
                     '_pdf_top':    row_ys_s[ri],
                     '_pdf_x1':     col_xs_s[ci + 1],
                     '_pdf_bottom': row_ys_s[ri + 1],
+                    # テーブル外周フラグ（描画時の垂直罫線抑制で使用）
+                    '_outer_left':   ci == 0,
+                    '_outer_right':  ci == n_cols - 1,
                 })
     page['table_border_rects'] = table_border_rects
 
@@ -403,10 +408,20 @@ def _apply_borders_to_xlsx(xlsx_path: str, extracted_data: dict, max_rows: int) 
         row_offset = (page_number - 1) * max_rows + ROW_PADDING
 
         for tbr in page.get('table_border_rects', []):
+            borders = tbr.get('_borders', {'top': True, 'bottom': True, 'left': True, 'right': True})
+            # ガントチャート等の細幅セル（Excel 2列以下）は内側の垂直罫線を抑制する。
+            # テーブル外周（_outer_left/_outer_right）はそのまま描画して外枠を維持する。
+            col_span = tbr['_end_col'] - tbr['_col']
+            if col_span <= 2:
+                borders = dict(borders)
+                if not tbr.get('_outer_left', False):
+                    borders['left'] = False
+                if not tbr.get('_outer_right', False):
+                    borders['right'] = False
             _draw(
                 tbr['_row'] + row_offset, tbr['_end_row'] + row_offset,
                 tbr['_col'] + COL_OFFSET, tbr['_end_col'] + COL_OFFSET,
-                tbr.get('_borders', {'top': True, 'bottom': True, 'left': True, 'right': True}),
+                borders,
             )
             total += 1
 
