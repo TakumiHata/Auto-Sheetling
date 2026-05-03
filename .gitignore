@@ -5,3 +5,6 @@ __pycache__/
 
 # Environment
 .env
+
+# MCP configuration (contains tokens)
+.mcp.json
